@@ -4,6 +4,7 @@ import pymc as pm
 import numpy as np
 import scipy.interpolate
 import scipy.sparse
+import pandas as pd
 
 
 def bspline_basis(k, n, degree=3):
@@ -15,7 +16,9 @@ def bspline_basis(k, n, degree=3):
     return scipy.sparse.csr_matrix(Bx)
 
 
-def bspline_gp(*, sparsity, length_scale, mean=0, scale=1, link=lambda x: x, dims=()):
+def bspline_gp(
+    *, sparsity, length_scale, mean=0, scale=1, link=lambda x: x, dims=(), sparse=True
+):
     model = pm.modelcontext(None)
     assert "time" in model.coords, "need time in coords"
     assert isinstance(
@@ -30,17 +33,23 @@ def bspline_gp(*, sparsity, length_scale, mean=0, scale=1, link=lambda x: x, dim
         ),
     )
     x = pd.Series(model.coords[model.name_for("latent_time")])
-    x = (x - x[0]).dt.total_seconds().values[:, None] / (60 * 60 * 24)
+    x = pm.floatX((x - x[0]).dt.total_seconds().values[:, None] / (60 * 60 * 24))
     B = bspline_basis(
         len(model.coords[model.name_for("latent_time")]), len(model.coords["time"])
     )
-    B = aesara.sparse.as_sparse_variable(B)
+    B = pm.floatX(B)
+    if sparse:
+        B = aesara.sparse.as_sparse_variable(B)
+        dot = lambda a, b, c: aesara.sparse.dot(a, b @ c)
+    else:
+        B = at.as_tensor(B.todense())
+        dot = lambda a, b, c: ((a @ b) @ c)
     cov = pm.gp.cov.Exponential(1, length_scale)(x)
     L_cov = at.linalg.cholesky(cov)
     rotated = pm.Normal("latent_rotated_", dims=(model.name_for("latent_time"), *dims))
     gp = pm.Deterministic(
         "gp",
-        link(mean + scale * aesara.sparse.dot(B, (L_cov @ rotated))),
+        link(mean + scale * dot(B, L_cov, rotated)),
         dims=("time", *dims),
     )
     return gp
